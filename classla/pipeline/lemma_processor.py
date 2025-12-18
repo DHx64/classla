@@ -22,11 +22,22 @@ class LemmaProcessor(UDProcessor):
     def __init__(self, config, pipeline, use_gpu):
         # run lemmatizer in identity mode
         self._use_identity = None
+        # LRU-style cache for (word_lower, xpos) -> lemma
+        self._lemma_cache = {}
+        self._cache_max_size = 100000  # Limit cache size
         super().__init__(config, pipeline, use_gpu)
 
     @property
     def use_identity(self):
         return self._use_identity
+
+    def clear_cache(self):
+        """Clear the lemma cache."""
+        self._lemma_cache.clear()
+
+    def cache_stats(self):
+        """Return cache statistics."""
+        return {'size': len(self._lemma_cache), 'max_size': self._cache_max_size}
 
     def _set_up_model(self, config, use_gpu):
         if config.get('use_identity') in ['True', True]:
@@ -49,10 +60,20 @@ class LemmaProcessor(UDProcessor):
             batch = DataLoader(document, self.config['batch_size'], self.config, vocab=self.vocab, evaluation=True)
         else:
             batch = DataLoader(document, self.config['batch_size'], self.config, evaluation=True, conll_only=True)
-        if self.use_identity:
+
+        # Get all (word, xpos) pairs for cache lookup
+        word_data = batch.doc.get([doc.TEXT, doc.XPOS])
+        cache_keys = [(w.lower(), x) for w, x in word_data]
+
+        # Check if all words are in cache
+        cached_preds = [self._lemma_cache.get(key) for key in cache_keys]
+        if all(p is not None for p in cached_preds):
+            # Full cache hit - skip all processing
+            preds = cached_preds
+        elif self.use_identity:
             preds = [word.text for sent in batch.doc.sentences for word in sent.words]
         elif self.config.get('dict_only', False):
-            preds = self.trainer.predict_dict(batch.doc.get([doc.TEXT, doc.XPOS]))
+            preds = self.trainer.predict_dict(word_data)
         else:
             if self.config.get('ensemble_dict', False):
                 # skip the seq2seq model when we can
@@ -87,5 +108,12 @@ class LemmaProcessor(UDProcessor):
 
         # map empty string lemmas to '_'
         preds = [max([(len(x), x), (0, '_')])[1] for x in preds]
+
+        # Update cache with new predictions (limit cache size)
+        if len(self._lemma_cache) < self._cache_max_size:
+            for key, pred in zip(cache_keys, preds):
+                if key not in self._lemma_cache:
+                    self._lemma_cache[key] = pred
+
         batch.doc.set([doc.LEMMA], preds)
         return batch.doc
