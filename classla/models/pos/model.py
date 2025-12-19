@@ -56,6 +56,8 @@ class TransformerPOSEncoder(nn.Module):
             # Unpack to padded tensor
             x_padded, lengths = pad_packed_sequence(x, batch_first=True)
             batch_size, max_len, input_dim = x_padded.shape
+            # Move lengths to same device as x_padded
+            lengths = lengths.to(x_padded.device)
 
             # Create padding mask from lengths
             mask = torch.arange(max_len, device=x_padded.device).unsqueeze(0) >= lengths.unsqueeze(1)
