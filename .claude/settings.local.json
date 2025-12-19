@@ -3,7 +3,11 @@
     "allow": [
       "Bash(grep:*)",
       "WebSearch",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(xargs grep:*)",
+      "Bash(python:*)"
     ]
   }
 }

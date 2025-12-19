@@ -58,6 +58,34 @@ class TransformerPOSEncoder(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
         return pe.unsqueeze(0)  # [1, max_len, d_model]
 
+    def _flatten_to_packed_order(self, out, batch_sizes):
+        """
+        Flatten [batch, seq, hidden] to [total_tokens, hidden] in PACKED order.
+
+        CRITICAL: This must match the order produced by pack_padded_sequence!
+
+        Packed order interleaves tokens by timestep:
+        - Sentences [A,B,C] and [D,E] become [A,D,B,E,C] (not [A,B,C,D,E])
+        - At timestep 0: take token 0 from all active sequences
+        - At timestep 1: take token 1 from all active sequences
+        - etc.
+
+        Args:
+            out: Transformer output [batch, max_seq_len, hidden_dim]
+            batch_sizes: From PackedSequence, tells how many sequences active at each timestep
+
+        Returns:
+            Flattened tensor [total_tokens, hidden_dim] in packed order
+        """
+        outputs = []
+        for t, num_active in enumerate(batch_sizes):
+            # At timestep t, take tokens from first num_active sequences
+            # batch_sizes[t] tells us how many sequences have length > t
+            for b in range(num_active):
+                outputs.append(out[b, t])
+
+        return torch.stack(outputs, dim=0)
+
     def forward(self, x, mask=None, sentlens=None):
         """
         Args:
@@ -68,8 +96,13 @@ class TransformerPOSEncoder(nn.Module):
         Returns:
             Tensor of shape [total_tokens, output_dim] (flattened like BiLSTM output)
         """
+        batch_sizes = None
+
         # Handle PackedSequence input (for compatibility with existing code)
         if isinstance(x, PackedSequence):
+            # CRITICAL: Save batch_sizes for correct output ordering!
+            batch_sizes = x.batch_sizes
+
             # Unpack to padded tensor
             x_padded, lengths = pad_packed_sequence(x, batch_first=True)
             batch_size, max_len, input_dim = x_padded.shape
@@ -100,11 +133,16 @@ class TransformerPOSEncoder(nn.Module):
         out = self.output_norm(out)
 
         # Flatten output to match BiLSTM format [total_tokens, hidden_dim * 2]
-        # Only keep non-padded tokens
-        if isinstance(x, PackedSequence) or sentlens is not None:
+        # CRITICAL: Must use packed order (interleaved by timestep) to match targets!
+        if batch_sizes is not None:
+            # Use packed order flattening to match pack_padded_sequence output order
+            return self._flatten_to_packed_order(out, batch_sizes)
+        elif sentlens is not None:
+            # Fallback for non-packed input with sentence lengths
             outputs = []
             for i, length in enumerate(lengths):
-                outputs.append(out[i, :length])
+                length_val = length.item() if torch.is_tensor(length) else int(length)
+                outputs.append(out[i, :length_val])
             return torch.cat(outputs, dim=0)
         else:
             return out.view(-1, self.output_dim)
