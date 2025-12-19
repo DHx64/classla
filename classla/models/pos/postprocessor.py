@@ -74,7 +74,8 @@ class InflectionalLexiconProcessor(object):
 
         # Convert ALL feature tensors to CPU lists ONCE
         # padded_prediction is a list of tensors, one per feature
-        feats_cpu = [feat_tensor.tolist() for feat_tensor in padded_prediction]
+        # Each tensor has shape [batch, seq, 1] due to keepdim=True, so squeeze it
+        feats_cpu = [feat_tensor.squeeze(-1).tolist() for feat_tensor in padded_prediction]
         num_feats = len(feats_cpu)
 
         for sent_id, (sent_strings, sent_xpos, sent_upos) in enumerate(zip(word_strings, xpos_preds, upos_preds)):
@@ -189,7 +190,8 @@ class SloveneInflectionalLexiconProcessor(InflectionalLexiconProcessor):
         predictions = []
 
         # Convert ALL feature tensors to CPU lists ONCE
-        feats_cpu = [feat_tensor.tolist() for feat_tensor in padded_prediction]
+        # Each tensor has shape [batch, seq, 1] due to keepdim=True, so squeeze it
+        feats_cpu = [feat_tensor.squeeze(-1).tolist() for feat_tensor in padded_prediction]
         num_feats = len(feats_cpu)
 
         for sent_id, (sent_strings, sent_xpos, sent_upos) in enumerate(zip(word_strings, xpos_preds, upos_preds)):
