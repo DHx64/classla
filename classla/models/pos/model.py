@@ -20,13 +20,21 @@ class TransformerPOSEncoder(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.output_dim = hidden_dim * 2  # Match BiLSTM bidirectional output
+        self.dropout = dropout
+
+        # Normalize input embeddings (critical for transformer stability)
+        self.input_norm = nn.LayerNorm(input_dim)
 
         # Project input to transformer dimension
         self.input_proj = nn.Linear(input_dim, self.output_dim)
+        # Initialize projection properly
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        nn.init.zeros_(self.input_proj.bias)
 
-        # Positional encoding (learnable)
-        self.pos_encoding = nn.Parameter(torch.zeros(1, 512, self.output_dim))
-        nn.init.normal_(self.pos_encoding, std=0.02)
+        self.proj_dropout = nn.Dropout(dropout)
+
+        # Positional encoding (sinusoidal - more stable than learned for small data)
+        self.register_buffer('pos_encoding', self._create_sinusoidal_encoding(512, self.output_dim))
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -40,6 +48,15 @@ class TransformerPOSEncoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.output_norm = nn.LayerNorm(self.output_dim)
+
+    def _create_sinusoidal_encoding(self, max_len, d_model):
+        """Create sinusoidal positional encodings."""
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        return pe.unsqueeze(0)  # [1, max_len, d_model]
 
     def forward(self, x, mask=None, sentlens=None):
         """
@@ -68,8 +85,12 @@ class TransformerPOSEncoder(nn.Module):
                 lengths = torch.tensor(sentlens, device=x_padded.device)
                 mask = torch.arange(max_len, device=x_padded.device).unsqueeze(0) >= lengths.unsqueeze(1)
 
+        # Normalize input embeddings (critical!)
+        x_normed = self.input_norm(x_padded)
+
         # Project input
-        x_proj = self.input_proj(x_padded)
+        x_proj = self.input_proj(x_normed)
+        x_proj = self.proj_dropout(x_proj)
 
         # Add positional encoding
         x_proj = x_proj + self.pos_encoding[:, :max_len, :]
