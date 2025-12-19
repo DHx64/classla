@@ -11,12 +11,12 @@ texts = [
 ]
 
 # Load transformer model manually for testing
-pretrain = Pretrain("~/classla_resources/sl/pretrain/standard.pt")
+pretrain = Pretrain("/root/classla_resources/sl/pretrain/standard.pt")
 trainer = Trainer(
     args={'use_transformer': True, 'transformer_layers': 4, 'transformer_heads': 8},
     pretrain=pretrain,
-    model_file="~/classla_resources/sl/pos/sl_transformer.pt",
-    use_cuda=False
+    model_file="/workspace/classla/saved_models/pos/sl_transformer",
+    use_cuda=True
 )
 
 # Time it
