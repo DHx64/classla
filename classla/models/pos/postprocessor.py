@@ -34,16 +34,18 @@ class InflectionalLexiconProcessor(object):
     def process_xpos(self, padded_prediction, word_strings):
         predictions = []
 
-        max_value = padded_prediction.max(2)[1]
+        # Convert to CPU list ONCE to avoid repeated .item() calls
+        max_value = padded_prediction.max(2)[1].tolist()
+        # Pre-compute fallback predictions for closed classes
+        closed_fallback = padded_prediction[:, :, self.closed_classes_xpos_inverse].argmax(2).tolist()
 
         for sent_id, (sent_indices, sent_strings) in enumerate(zip(max_value, word_strings)):
             sent_predictions = []
             for word_id, (word_prediction, word_string) in enumerate(zip(sent_indices, sent_strings)):
-                if word_prediction.item() not in self.closed_classes_xpos:
-                    prediction = self.xpos_vocab[word_prediction.item()]
+                if word_prediction not in self.closed_classes_xpos:
+                    prediction = self.xpos_vocab[word_prediction]
                 else:
-                    prediction = self.xpos_vocab[self.closed_classes_xpos_inverse[
-                        padded_prediction[sent_id, word_id, self.closed_classes_xpos_inverse].argmax().item()]]
+                    prediction = self.xpos_vocab[self.closed_classes_xpos_inverse[closed_fallback[sent_id][word_id]]]
                 sent_predictions.append(prediction)
             predictions.append(sent_predictions)
         return predictions
@@ -51,16 +53,18 @@ class InflectionalLexiconProcessor(object):
     def process_upos(self, padded_prediction, word_strings, xpos_preds):
         predictions = []
 
-        max_value = padded_prediction.max(2)[1]
+        # Convert to CPU list ONCE to avoid repeated .item() calls
+        max_value = padded_prediction.max(2)[1].tolist()
+        # Pre-compute fallback predictions for closed classes
+        closed_fallback = padded_prediction[:, :, self.closed_classes_upos_inverse].argmax(2).tolist()
 
         for sent_id, (sent_indices, sent_strings) in enumerate(zip(max_value, word_strings)):
             sent_predictions = []
             for word_id, (word_prediction, word_string) in enumerate(zip(sent_indices, sent_strings)):
-                if word_prediction.item() not in self.closed_classes_upos:
-                    prediction = self.upos_vocab[word_prediction.item()]
+                if word_prediction not in self.closed_classes_upos:
+                    prediction = self.upos_vocab[word_prediction]
                 else:
-                    prediction = self.upos_vocab[self.closed_classes_upos_inverse[
-                        padded_prediction[sent_id, word_id, self.closed_classes_upos_inverse].argmax().item()]]
+                    prediction = self.upos_vocab[self.closed_classes_upos_inverse[closed_fallback[sent_id][word_id]]]
                 sent_predictions.append(prediction)
             predictions.append(sent_predictions)
         return predictions
@@ -68,12 +72,15 @@ class InflectionalLexiconProcessor(object):
     def process_feats(self, padded_prediction, word_strings, xpos_preds, upos_preds):
         predictions = []
 
+        # Convert ALL feature tensors to CPU lists ONCE
+        # padded_prediction is a list of tensors, one per feature
+        feats_cpu = [feat_tensor.tolist() for feat_tensor in padded_prediction]
+        num_feats = len(feats_cpu)
+
         for sent_id, (sent_strings, sent_xpos, sent_upos) in enumerate(zip(word_strings, xpos_preds, upos_preds)):
             sent_predictions = []
             for word_id in range(len(sent_strings)):
-                word_feat = []
-                for feat_id in range(len(padded_prediction)):
-                    word_feat.append(padded_prediction[feat_id][sent_id, word_id].item())
+                word_feat = [feats_cpu[feat_id][sent_id][word_id] for feat_id in range(num_feats)]
                 prediction = self.feats_vocab[word_feat]
                 sent_predictions.append(prediction)
             predictions.append(sent_predictions)
@@ -114,7 +121,12 @@ class SloveneInflectionalLexiconProcessor(InflectionalLexiconProcessor):
     def process_xpos(self, padded_prediction, word_strings):
         predictions = []
 
-        max_value = padded_prediction.max(2)[1]
+        # Convert to CPU lists ONCE to avoid repeated .item() calls
+        max_value = padded_prediction.max(2)[1].tolist()
+        # Pre-compute fallback for closed classes
+        closed_fallback = padded_prediction[:, :, self.closed_classes_xpos_inverse].argmax(2).tolist()
+        # Keep padded_prediction on GPU for optional_indices lookup (rare)
+        padded_cpu = padded_prediction.cpu()
 
         for sent_id, (sent_indices, sent_strings) in enumerate(zip(max_value, word_strings)):
             sent_predictions = []
@@ -123,18 +135,18 @@ class SloveneInflectionalLexiconProcessor(InflectionalLexiconProcessor):
                     # if only one possible prediction in hypothesis dictionary, take it!
                     if len(self.hypothesis_dictionary_xpos[word_string]) == 1:
                         prediction = self.hypothesis_dictionary_xpos[word_string][0]
-                    elif self.xpos_vocab[word_prediction.item()] in self.hypothesis_dictionary_xpos[word_string]:
-                        prediction = self.xpos_vocab[word_prediction.item()]
+                    elif self.xpos_vocab[word_prediction] in self.hypothesis_dictionary_xpos[word_string]:
+                        prediction = self.xpos_vocab[word_prediction]
                     else:
                         optional_indices = [self.xpos_vocab[el] for el in self.hypothesis_dictionary_xpos[word_string]]
-                        prediction = self.xpos_vocab[optional_indices[padded_prediction[sent_id, word_id, optional_indices].argmax().item()]]
+                        prediction = self.xpos_vocab[optional_indices[padded_cpu[sent_id, word_id, optional_indices].argmax().item()]]
                 elif word_string in self.hypothesis_dictionary_xpos_fallback:
                     prediction = self.hypothesis_dictionary_xpos_fallback[word_string][0]
                 else:
-                    if word_prediction.item() not in self.closed_classes_xpos:
-                        prediction = self.xpos_vocab[word_prediction.item()]
+                    if word_prediction not in self.closed_classes_xpos:
+                        prediction = self.xpos_vocab[word_prediction]
                     else:
-                        prediction = self.xpos_vocab[self.closed_classes_xpos_inverse[padded_prediction[sent_id, word_id, self.closed_classes_xpos_inverse].argmax().item()]]
+                        prediction = self.xpos_vocab[self.closed_classes_xpos_inverse[closed_fallback[sent_id][word_id]]]
                 sent_predictions.append(prediction)
             predictions.append(sent_predictions)
         return predictions
@@ -142,7 +154,12 @@ class SloveneInflectionalLexiconProcessor(InflectionalLexiconProcessor):
     def process_upos(self, padded_prediction, word_strings, upos_preds):
         predictions = []
 
-        max_value = padded_prediction.max(2)[1]
+        # Convert to CPU lists ONCE to avoid repeated .item() calls
+        max_value = padded_prediction.max(2)[1].tolist()
+        # Pre-compute fallback for closed classes
+        closed_fallback = padded_prediction[:, :, self.closed_classes_upos_inverse].argmax(2).tolist()
+        # Keep padded_prediction on CPU for optional_indices lookup (rare)
+        padded_cpu = padded_prediction.cpu()
 
         for sent_id, (sent_indices, sent_strings, sent_upos) in enumerate(zip(max_value, word_strings, upos_preds)):
             sent_predictions = []
@@ -152,26 +169,28 @@ class SloveneInflectionalLexiconProcessor(InflectionalLexiconProcessor):
                     # if only one possible prediction in hypothesis dictionary, take it!
                     if len(self.hypothesis_dictionary_upos[key_tuple]) == 1:
                         prediction = self.hypothesis_dictionary_upos[key_tuple][0]
-                    elif self.upos_vocab[word_prediction.item()] in self.hypothesis_dictionary_upos[key_tuple]:
-                        prediction = self.upos_vocab[word_prediction.item()]
+                    elif self.upos_vocab[word_prediction] in self.hypothesis_dictionary_upos[key_tuple]:
+                        prediction = self.upos_vocab[word_prediction]
                     else:
                         optional_indices = [self.upos_vocab[el] for el in self.hypothesis_dictionary_upos[key_tuple]]
-                        prediction = self.upos_vocab[optional_indices[padded_prediction[sent_id, word_id, optional_indices].argmax().item()]]
+                        prediction = self.upos_vocab[optional_indices[padded_cpu[sent_id, word_id, optional_indices].argmax().item()]]
                 elif key_tuple in self.hypothesis_dictionary_upos_fallback:
                     prediction = self.hypothesis_dictionary_upos_fallback[key_tuple][0]
                 else:
-                    # prediction = self.upos_vocab[padded_prediction[sent_id, word_id].argmax().item()]
-                    if word_prediction.item() not in self.closed_classes_upos:
-                        prediction = self.upos_vocab[word_prediction.item()]
+                    if word_prediction not in self.closed_classes_upos:
+                        prediction = self.upos_vocab[word_prediction]
                     else:
-                        prediction = self.upos_vocab[self.closed_classes_upos_inverse[
-                            padded_prediction[sent_id, word_id, self.closed_classes_upos_inverse].argmax().item()]]
+                        prediction = self.upos_vocab[self.closed_classes_upos_inverse[closed_fallback[sent_id][word_id]]]
                 sent_predictions.append(prediction)
             predictions.append(sent_predictions)
         return predictions
 
     def process_feats(self, padded_prediction, word_strings, xpos_preds, upos_preds):
         predictions = []
+
+        # Convert ALL feature tensors to CPU lists ONCE
+        feats_cpu = [feat_tensor.tolist() for feat_tensor in padded_prediction]
+        num_feats = len(feats_cpu)
 
         for sent_id, (sent_strings, sent_xpos, sent_upos) in enumerate(zip(word_strings, xpos_preds, upos_preds)):
             sent_predictions = []
@@ -180,9 +199,7 @@ class SloveneInflectionalLexiconProcessor(InflectionalLexiconProcessor):
                 if key_tuple in self.hypothesis_dictionary_feats:
                     prediction = self.hypothesis_dictionary_feats[key_tuple][0]
                 else:
-                    word_feat = []
-                    for feat_id in range(len(padded_prediction)):
-                        word_feat.append(padded_prediction[feat_id][sent_id, word_id].item())
+                    word_feat = [feats_cpu[feat_id][sent_id][word_id] for feat_id in range(num_feats)]
                     prediction = self.feats_vocab[word_feat]
                 sent_predictions.append(prediction)
             predictions.append(sent_predictions)
