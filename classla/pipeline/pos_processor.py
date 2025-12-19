@@ -2,6 +2,7 @@
 Processor for performing part-of-speech tagging
 """
 import os
+import torch
 
 from classla.models.common import doc
 from classla.models.common.pretrain import Pretrain
@@ -10,6 +11,9 @@ from classla.models.pos.data import DataLoader
 from classla.models.pos.trainer import Trainer
 from classla.pipeline._constants import *
 from classla.pipeline.processor import UDProcessor, register_processor
+
+# Transformer-specific batch size for faster inference (50K tokens vs 5K default)
+TRANSFORMER_BATCH_SIZE = 50000
 
 @register_processor(name=POS)
 class POSProcessor(UDProcessor):
@@ -43,12 +47,19 @@ class POSProcessor(UDProcessor):
         return [pos if pos[0] is not None else False for pos in seq]
 
     def process(self, document):
+        # Use larger batch size for transformer models (10x faster inference)
+        use_transformer = self.config.get('use_transformer', False)
+        batch_size = TRANSFORMER_BATCH_SIZE if use_transformer else self.config['batch_size']
+
         batch = DataLoader(
-            document, self.config['batch_size'], self.config, self.pretrain, vocab=self.vocab, evaluation=True,
+            document, batch_size, self.config, self.pretrain, vocab=self.vocab, evaluation=True,
             sort_during_eval=True)
         preds = []
-        for i, b in enumerate(batch):
-            preds += self.trainer.predict(b)
+
+        # Use inference_mode for faster execution (no grad tracking overhead)
+        with torch.inference_mode():
+            for i, b in enumerate(batch):
+                preds += self.trainer.predict(b)
 
         if not preds:
             return batch.doc
