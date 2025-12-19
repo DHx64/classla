@@ -3,21 +3,18 @@ import torch
 
 import classla.models.common.seq2seq_constant as constant
 
-"""
- Adapted and modified from the OpenNMT project.
-
- Class for managing the internals of the beam search process.
-
-
-         hyp1-hyp1---hyp1 -hyp1
-                 \             /
-         hyp2 \-hyp2 /-hyp2hyp2
-                               /      \
-         hyp3-hyp3---hyp3 -hyp3
-         ========================
-
- Takes care of beams, back pointers, and scores.
-"""
+# Adapted and modified from the OpenNMT project.
+#
+# Class for managing the internals of the beam search process.
+#
+#         hyp1-hyp1---hyp1 -hyp1
+#                 \             /
+#         hyp2 \-hyp2 /-hyp2hyp2
+#                               /
+#         hyp3-hyp3---hyp3 -hyp3
+#         ========================
+#
+# Takes care of beams, back pointers, and scores.
 
 
 class Beam(object):

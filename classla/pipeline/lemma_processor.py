@@ -65,49 +65,95 @@ class LemmaProcessor(UDProcessor):
         word_data = batch.doc.get([doc.TEXT, doc.XPOS])
         cache_keys = [(w.lower(), x) for w, x in word_data]
 
-        # Check if all words are in cache
+        # Check cache for each word - partial cache support
         cached_preds = [self._lemma_cache.get(key) for key in cache_keys]
-        if all(p is not None for p in cached_preds):
+        cache_hits = [p is not None for p in cached_preds]
+
+        if all(cache_hits):
             # Full cache hit - skip all processing
             preds = cached_preds
         elif self.use_identity:
             preds = [word.text for sent in batch.doc.sentences for word in sent.words]
         elif self.config.get('dict_only', False):
-            preds = self.trainer.predict_dict(word_data)
-        else:
-            if self.config.get('ensemble_dict', False):
-                # skip the seq2seq model when we can
-                skip = self.trainer.skip_seq2seq([(e[0].lower(),e[1],e[2]) for e in batch.doc.get([doc.TEXT, doc.XPOS, doc.LEMMA])])
-                seq2seq_batch = DataLoader(document, self.config['batch_size'], self.config, vocab=self.vocab,
-                                           evaluation=True, skip=skip)
-            else:
-                seq2seq_batch = batch
-
-            preds = []
-            edits = []
-            for i, b in enumerate(seq2seq_batch):
-                ps, es = self.trainer.predict(b, self.config['beam_size'])
-                preds += ps
-                if es is not None:
-                    edits += es
-
-            if self.config.get('ensemble_dict', False):
-                preds = self.trainer.postprocess([x for x, y in zip(batch.doc.get([doc.TEXT]), skip) if not y], preds, edits=edits)
-                # expand seq2seq predictions to the same size as all words
-                i = 0
-                preds1 = []
-                for s in skip:
-                    if s:
-                        preds1.append('')
+            # For dict_only mode, process only uncached words
+            if any(cache_hits):
+                # Partial cache: only lookup uncached words
+                uncached_word_data = [(w, x) for (w, x), hit in zip(word_data, cache_hits) if not hit]
+                uncached_preds = self.trainer.predict_dict(uncached_word_data)
+                # Merge cached and new predictions
+                preds = []
+                uncached_idx = 0
+                for i, hit in enumerate(cache_hits):
+                    if hit:
+                        preds.append(cached_preds[i])
                     else:
-                        preds1.append(preds[i])
-                        i += 1
-                preds = self.trainer.ensemble([(e[0].lower(),e[1],e[2]) for e in batch.doc.get([doc.TEXT, doc.XPOS, doc.LEMMA])], preds1)
+                        preds.append(uncached_preds[uncached_idx])
+                        uncached_idx += 1
             else:
-                preds = self.trainer.postprocess(batch.doc.get([doc.TEXT]), preds, edits=edits)
+                preds = self.trainer.predict_dict(word_data)
+        else:
+            # Combine cache skip with ensemble_dict skip
+            cache_skip = cache_hits  # True = skip (use cache)
 
-        # map empty string lemmas to '_'
-        preds = [max([(len(x), x), (0, '_')])[1] for x in preds]
+            if self.config.get('ensemble_dict', False):
+                # skip the seq2seq model when we can (dict hits)
+                dict_skip = self.trainer.skip_seq2seq([(e[0].lower(),e[1],e[2]) for e in batch.doc.get([doc.TEXT, doc.XPOS, doc.LEMMA])])
+                # Combine: skip if either cached OR dict hit
+                combined_skip = [c or d for c, d in zip(cache_skip, dict_skip)]
+            else:
+                combined_skip = cache_skip
+                dict_skip = [False] * len(cache_skip)
+
+            # Only process words not in cache
+            if all(combined_skip):
+                # All words either cached or dict-hit - need to get dict predictions for non-cached
+                if self.config.get('ensemble_dict', False) and not all(cache_hits):
+                    # Some words are dict-hits but not cached - get them via ensemble
+                    ensemble_preds = self.trainer.ensemble([(e[0].lower(),e[1],e[2]) for e in batch.doc.get([doc.TEXT, doc.XPOS, doc.LEMMA])], [''] * len(cache_hits))
+                    preds = [cached_preds[i] if cache_hits[i] else ensemble_preds[i] for i in range(len(cache_hits))]
+                else:
+                    preds = cached_preds[:]
+            else:
+                seq2seq_batch = DataLoader(document, self.config['batch_size'], self.config, vocab=self.vocab,
+                                           evaluation=True, skip=combined_skip)
+
+                seq2seq_preds = []
+                edits = []
+                for i, b in enumerate(seq2seq_batch):
+                    ps, es = self.trainer.predict(b, self.config['beam_size'])
+                    seq2seq_preds += ps
+                    if es is not None:
+                        edits += es
+
+                if self.config.get('ensemble_dict', False):
+                    seq2seq_preds = self.trainer.postprocess([x for x, y in zip(batch.doc.get([doc.TEXT]), combined_skip) if not y], seq2seq_preds, edits=edits)
+                    # expand seq2seq predictions: empty for skipped words
+                    i = 0
+                    expanded_preds = []
+                    for s in combined_skip:
+                        if s:
+                            expanded_preds.append('')
+                        else:
+                            expanded_preds.append(seq2seq_preds[i])
+                            i += 1
+                    # Ensemble only for non-cached words
+                    ensemble_preds = self.trainer.ensemble([(e[0].lower(),e[1],e[2]) for e in batch.doc.get([doc.TEXT, doc.XPOS, doc.LEMMA])], expanded_preds)
+                    # Merge: use cache where available, ensemble otherwise
+                    preds = [cached_preds[i] if cache_hits[i] else ensemble_preds[i] for i in range(len(cache_hits))]
+                else:
+                    seq2seq_preds = self.trainer.postprocess([x for x, y in zip(batch.doc.get([doc.TEXT]), cache_skip) if not y], seq2seq_preds, edits=edits)
+                    # Merge cached and seq2seq predictions
+                    preds = []
+                    seq2seq_idx = 0
+                    for i, hit in enumerate(cache_hits):
+                        if hit:
+                            preds.append(cached_preds[i])
+                        else:
+                            preds.append(seq2seq_preds[seq2seq_idx])
+                            seq2seq_idx += 1
+
+        # map empty string lemmas to '_', handle None values
+        preds = [max([(len(x) if x else 0, x or '_'), (0, '_')])[1] for x in preds]
 
         # Update cache with new predictions (limit cache size)
         if len(self._lemma_cache) < self._cache_max_size:

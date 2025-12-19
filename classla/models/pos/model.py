@@ -10,6 +10,83 @@ from classla.models.common.dropout import WordDropout
 from classla.models.common.vocab import CompositeVocab
 from classla.models.common.char_model import CharacterModel
 
+
+class TransformerPOSEncoder(nn.Module):
+    """
+    Transformer encoder for POS tagging.
+    Drop-in replacement for Highway BiLSTM that processes sequences in parallel.
+    """
+    def __init__(self, input_dim, hidden_dim, num_layers=4, num_heads=8, ff_dim=1024, dropout=0.1):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.output_dim = hidden_dim * 2  # Match BiLSTM bidirectional output
+
+        # Project input to transformer dimension
+        self.input_proj = nn.Linear(input_dim, self.output_dim)
+
+        # Positional encoding (learnable)
+        self.pos_encoding = nn.Parameter(torch.zeros(1, 512, self.output_dim))
+        nn.init.normal_(self.pos_encoding, std=0.02)
+
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.output_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True  # Pre-norm for better training stability
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.output_norm = nn.LayerNorm(self.output_dim)
+
+    def forward(self, x, mask=None, sentlens=None):
+        """
+        Args:
+            x: PackedSequence or tensor of shape [batch, seq_len, input_dim]
+            mask: Padding mask [batch, seq_len] where True = padding
+            sentlens: List of sentence lengths (used if x is PackedSequence)
+
+        Returns:
+            Tensor of shape [total_tokens, output_dim] (flattened like BiLSTM output)
+        """
+        # Handle PackedSequence input (for compatibility with existing code)
+        if isinstance(x, PackedSequence):
+            # Unpack to padded tensor
+            x_padded, lengths = pad_packed_sequence(x, batch_first=True)
+            batch_size, max_len, input_dim = x_padded.shape
+
+            # Create padding mask from lengths
+            mask = torch.arange(max_len, device=x_padded.device).unsqueeze(0) >= lengths.unsqueeze(1)
+        else:
+            x_padded = x
+            batch_size, max_len, _ = x_padded.shape
+            if sentlens is not None:
+                lengths = torch.tensor(sentlens, device=x_padded.device)
+                mask = torch.arange(max_len, device=x_padded.device).unsqueeze(0) >= lengths.unsqueeze(1)
+
+        # Project input
+        x_proj = self.input_proj(x_padded)
+
+        # Add positional encoding
+        x_proj = x_proj + self.pos_encoding[:, :max_len, :]
+
+        # Apply transformer
+        out = self.transformer(x_proj, src_key_padding_mask=mask)
+        out = self.output_norm(out)
+
+        # Flatten output to match BiLSTM format [total_tokens, hidden_dim * 2]
+        # Only keep non-padded tokens
+        if isinstance(x, PackedSequence) or sentlens is not None:
+            outputs = []
+            for i, length in enumerate(lengths):
+                outputs.append(out[i, :length])
+            return torch.cat(outputs, dim=0)
+        else:
+            return out.view(-1, self.output_dim)
+
+
 class Tagger(nn.Module):
     def __init__(self, args, vocab, emb_matrix=None, share_hid=False):
         super().__init__()
@@ -45,11 +122,24 @@ class Tagger(nn.Module):
             self.trans_pretrained = nn.Linear(emb_matrix.shape[1], self.args['transformed_dim'], bias=False)
             input_size += self.args['transformed_dim']
         
-        # recurrent layers
-        self.taggerlstm = HighwayLSTM(input_size, self.args['hidden_dim'], self.args['num_layers'], batch_first=True, bidirectional=True, dropout=self.args['dropout'], rec_dropout=self.args['rec_dropout'], highway_func=torch.tanh)
+        # recurrent layers - either BiLSTM or Transformer
+        self.use_transformer = self.args.get('use_transformer', False)
+
+        if self.use_transformer:
+            self.encoder = TransformerPOSEncoder(
+                input_dim=input_size,
+                hidden_dim=self.args['hidden_dim'],
+                num_layers=self.args.get('transformer_layers', 4),
+                num_heads=self.args.get('transformer_heads', 8),
+                ff_dim=self.args.get('transformer_ff_dim', 1024),
+                dropout=self.args['dropout']
+            )
+        else:
+            self.taggerlstm = HighwayLSTM(input_size, self.args['hidden_dim'], self.args['num_layers'], batch_first=True, bidirectional=True, dropout=self.args['dropout'], rec_dropout=self.args['rec_dropout'], highway_func=torch.tanh)
+            self.taggerlstm_h_init = nn.Parameter(torch.zeros(2 * self.args['num_layers'], 1, self.args['hidden_dim']))
+            self.taggerlstm_c_init = nn.Parameter(torch.zeros(2 * self.args['num_layers'], 1, self.args['hidden_dim']))
+
         self.drop_replacement = nn.Parameter(torch.randn(input_size) / np.sqrt(input_size))
-        self.taggerlstm_h_init = nn.Parameter(torch.zeros(2 * self.args['num_layers'], 1, self.args['hidden_dim']))
-        self.taggerlstm_c_init = nn.Parameter(torch.zeros(2 * self.args['num_layers'], 1, self.args['hidden_dim']))
 
         # classifiers
         self.upos_hid = nn.Linear(self.args['hidden_dim'] * 2, self.args['deep_biaff_hidden_dim'])
@@ -119,8 +209,12 @@ class Tagger(nn.Module):
         lstm_inputs = self.drop(lstm_inputs)
         lstm_inputs = PackedSequence(lstm_inputs, inputs[0].batch_sizes)
 
-        lstm_outputs, _ = self.taggerlstm(lstm_inputs, sentlens, hx=(self.taggerlstm_h_init.expand(2 * self.args['num_layers'], word.size(0), self.args['hidden_dim']).contiguous(), self.taggerlstm_c_init.expand(2 * self.args['num_layers'], word.size(0), self.args['hidden_dim']).contiguous()))
-        lstm_outputs = lstm_outputs.data
+        if self.use_transformer:
+            # Transformer encoder handles PackedSequence and returns flattened output
+            lstm_outputs = self.encoder(lstm_inputs, sentlens=sentlens)
+        else:
+            lstm_outputs, _ = self.taggerlstm(lstm_inputs, sentlens, hx=(self.taggerlstm_h_init.expand(2 * self.args['num_layers'], word.size(0), self.args['hidden_dim']).contiguous(), self.taggerlstm_c_init.expand(2 * self.args['num_layers'], word.size(0), self.args['hidden_dim']).contiguous()))
+            lstm_outputs = lstm_outputs.data
 
         upos_hid = F.relu(self.upos_hid(self.drop(lstm_outputs)))
         upos_pred = self.upos_clf(self.drop(upos_hid))

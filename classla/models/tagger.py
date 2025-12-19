@@ -65,6 +65,12 @@ def parse_args(args=None):
     parser.add_argument('--share_hid', action='store_true', help="Share hidden representations for UPOS, XPOS and UFeats.")
     parser.set_defaults(share_hid=False)
 
+    # Transformer encoder options (alternative to BiLSTM)
+    parser.add_argument('--use_transformer', action='store_true', help="Use transformer encoder instead of BiLSTM.")
+    parser.add_argument('--transformer_layers', type=int, default=4, help="Number of transformer encoder layers.")
+    parser.add_argument('--transformer_heads', type=int, default=8, help="Number of attention heads.")
+    parser.add_argument('--transformer_ff_dim', type=int, default=1024, help="Transformer feed-forward dimension.")
+
     parser.add_argument('--sample_train', type=float, default=1.0, help='Subsample training data.')
     parser.add_argument('--optim', type=str, default='adam', help='sgd, adagrad, adam or adamax.')
     parser.add_argument('--lr', type=float, default=3e-3, help='Learning rate')

@@ -3,6 +3,7 @@ from classla.models.common.doc import Document
 from classla.resources.common import download
 from classla.resources.installation import install_corenlp, download_corenlp_models
 from classla._version import __version__, __resources_version__
+from classla.utils.parallel import ParallelPipeline, process_parallel
 
 import logging
 logger = logging.getLogger('classla')
