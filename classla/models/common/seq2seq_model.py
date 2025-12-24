@@ -198,9 +198,11 @@ class Seq2SeqModel(nn.Module):
             _, preds = log_probs.squeeze(1).max(1, keepdim=True)
             dec_inputs = self.embedding(preds) # update decoder inputs
             max_len += 1
+            # Convert to CPU list ONCE to avoid repeated .item() calls
+            preds_cpu = preds.data.squeeze(-1).tolist()
             for i in range(batch_size):
                 if not done[i]:
-                    token = preds.data[i][0].item()
+                    token = preds_cpu[i]
                     if token == constant.EOS_ID:
                         done[i] = True
                         total_done += 1
@@ -275,7 +277,8 @@ class Seq2SeqModel(nn.Module):
             k = ks[0]
             hyp = beam[b].get_hyp(k)
             hyp = utils.prune_hyp(hyp)
-            hyp = [i.item() for i in hyp]
+            # Use tolist() instead of [i.item() for i in hyp]
+            hyp = [i.item() if torch.is_tensor(i) else i for i in hyp]
             all_hyp += [hyp]
 
         return all_hyp, edit_logits

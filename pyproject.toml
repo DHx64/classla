@@ -54,11 +54,10 @@ packages = ["classla"]
 [project.optional-dependencies]
 dev = ["pytest>=6.0", "twine>=4.0.2", "build"]
 
-# Uncomment below for CPU-only PyTorch (smaller install, no NVIDIA deps)
-# [tool.uv.sources]
-# torch = { index = "pytorch-cpu" }
-#
-# [[tool.uv.index]]
-# name = "pytorch-cpu"
-# url = "https://download.pytorch.org/whl/cpu"
-# explicit = true
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
